@@ -374,6 +374,242 @@ play() {
 	fi
 }
 
+queue() {
+	usage="Usage: queue [--next|--last] [-grouping] [name]
+
+  --next                Add to beginning of queue (play next)
+  --last                Add to end of queue (default)
+  
+  -s                    Fzf for a song and add to queue.
+  -s PATTERN            Add the song PATTERN to queue.
+  -r                    Fzf for a record and add to queue.
+  -r PATTERN            Add tracks from the record PATTERN to queue.
+  -a                    Fzf for an artist and add to queue.
+  -a PATTERN            Add tracks from the artist PATTERN to queue.
+  -p                    Fzf for a playlist and add to queue.
+  -p PATTERN            Add tracks from the playlist PATTERN to queue.
+  -g                    Fzf for a genre and add to queue.
+  -g PATTERN            Add tracks from the genre PATTERN to queue."
+	
+	# Default to --last (add to end)
+	queue_position="last"
+	
+	# Parse --next or --last flag
+	if [ "$#" -gt 0 ] && [ "$1" = "--next" ]; then
+		queue_position="next"
+		shift
+	elif [ "$#" -gt 0 ] && [ "$1" = "--last" ]; then
+		queue_position="last"
+		shift
+	fi
+	
+	if [ "$#" -eq 0 ]; then
+		printf '%s\n' "$usage"
+	else
+		if [ $1 = "-p" ]
+		then
+			if [ "$#" -eq 1 ]; then
+				playlist=$(osascript -e 'tell application "Music" to get name of playlists' | tr "," "\n" | fzf)
+				set -- ${playlist:1}
+			else
+				shift
+			fi
+			osascript -e 'on run argv
+				tell application "Music"
+					set playlistName to item 1 of argv as string
+					set theseTracks to every track of playlist playlistName
+					repeat with thisTrack in theseTracks
+						add thisTrack to queue
+					end repeat
+				end tell
+			end' "$*"
+		elif [ $1 = "-s" ]
+		then
+			if [ "$#" -eq 1 ]; then
+				# Get only track names (fast for large libraries)
+				song=$(osascript -e 'tell application "Music" to get name of every track' | tr "," "\n" | sort -uf | fzf)
+				# Check if user cancelled fzf (empty selection)
+				if [ -z "$song" ]; then
+					exit 0
+				fi
+				# Check if there are multiple tracks with this name (case insensitive)
+				all_tracks=$(osascript -e 'tell application "Music"
+					set trackList to {}
+					repeat with t in every track
+						set trackList to trackList & (name of t & "|" & artist of t & "|" & album of t)
+					end repeat
+					return trackList
+				end tell' | tr "," "\n")
+				# Filter tracks with same name (case insensitive)
+				track_list=$(echo "$all_tracks" | awk -F'|' -v song="$song" 'tolower($1) == tolower(song) {print $1 "|" $2 "|" $3}')
+				# Count tracks with same name (case insensitive)
+				match_count=$(echo "$track_list" | grep -v '^$' | wc -l | tr -d ' ')
+				if [ "$match_count" -gt 1 ]; then
+					# Multiple tracks with same name, show fzf with artist and album names
+					formatted=$(echo "$track_list" | awk -F'|' '{print $1 " - " $2 " - " $3}' | fzf)
+					# Check if user cancelled fzf
+					if [ -z "$formatted" ]; then
+						exit 0
+					fi
+					# Extract track info from the formatted string
+					track_name=$(echo "$formatted" | sed 's/ - .*//' | xargs)
+					artist_name=$(echo "$formatted" | sed 's/^[^\-]* - //' | sed 's/ - .*//' | xargs)
+					album_name=$(echo "$formatted" | sed 's/^[^\-]* - [^\-]* - //' | xargs)
+				else
+					# Single match, extract from track_list
+					track_name=$(echo "$track_list" | awk -F'|' '{print $1}' | head -n 1 | xargs)
+					artist_name=$(echo "$track_list" | awk -F'|' '{print $2}' | head -n 1 | xargs)
+					album_name=$(echo "$track_list" | awk -F'|' '{print $3}' | head -n 1 | xargs)
+				fi
+				shortcuts_queue "$queue_position" "$track_name" "$artist_name" "$album_name"
+			else
+				shift
+				query="$*"
+				# Use AppleScript to filter tracks directly
+				track_list=$(osascript -e 'on run argv
+					tell application "Music"
+						set trackList to {}
+						set searchQuery to item 1 of argv
+						repeat with t in (every track whose name contains searchQuery)
+							set trackList to trackList & (name of t & "|" & artist of t & "|" & album of t)
+						end repeat
+						return trackList
+					end tell
+				end' "$query" | tr "," "\n")
+				
+				# Filter for case-insensitive match and format as "Track Name - Artist Name - Album Name"
+				matches=$(echo "$track_list" | awk -F'|' -v query="$query" '
+					tolower($1) ~ tolower(query) {
+						print $1 " - " $2 " - " $3
+					}
+				')
+				
+				match_count=$(echo "$matches" | grep -v '^$' | wc -l | tr -d ' ')
+				
+				if [ "$match_count" -eq 0 ]; then
+					echo "No tracks found matching: $query"
+					exit 1
+				fi
+				
+				# Count exact matches (case insensitive)
+				exact_matches=$(echo "$track_list" | awk -F'|' -v query="$query" '
+					tolower($1) == tolower(query) {
+						print $1 " - " $2 " - " $3
+					}
+				')
+				exact_count=$(echo "$exact_matches" | grep -v '^$' | wc -l | tr -d ' ')
+				
+				# If multiple matches or no exact match, show fzf with artist and album names
+				if [ "$match_count" -gt 1 ] || [ "$exact_count" -ne 1 ]; then
+					selected=$(echo "$matches" | fzf --query "$query")
+					# Check if user cancelled fzf (empty selection)
+					if [ -z "$selected" ]; then
+						exit 0
+					fi
+					# Extract track info from the selected formatted string
+					track_name=$(echo "$selected" | sed 's/ - .*//' | xargs)
+					artist_name=$(echo "$selected" | sed 's/^[^\-]* - //' | sed 's/ - .*//' | xargs)
+					album_name=$(echo "$selected" | sed 's/^[^\-]* - [^\-]* - //' | xargs)
+				else
+					# Exactly one exact match, extract from exact_matches
+					track_name=$(echo "$exact_matches" | sed 's/ - .*//' | xargs)
+					artist_name=$(echo "$exact_matches" | sed 's/^[^\-]* - //' | sed 's/ - .*//' | xargs)
+					album_name=$(echo "$exact_matches" | sed 's/^[^\-]* - [^\-]* - //' | xargs)
+				fi
+				shortcuts_queue "$queue_position" "$track_name" "$artist_name" "$album_name"
+			fi
+		elif [ $1 = "-r" ]
+		then
+			if [ "$#" -eq 1 ]; then
+				record=$(osascript -e 'tell application "Music" to get album of every track' | tr "," "\n" | sort | awk '!seen[$0]++' | fzf)
+				set -- ${record:1}
+			else
+				shift
+			fi
+			osascript -e 'on run argv
+				tell application "Music"
+					set albumName to item 1 of argv as string
+					set theseTracks to every track of playlist "Library" whose album is albumName
+					repeat with thisTrack in theseTracks
+						add thisTrack to queue
+					end repeat
+				end tell
+			end' "$*"
+		elif [ $1 = "-a" ]
+		then
+			if [ "$#" -eq 1 ]; then
+				artist=$(osascript -e 'tell application "Music" to get artist of every track' | tr "," "\n" | sort | awk '!seen[$0]++' | fzf)
+				set -- ${artist:1}
+			else
+				shift
+			fi
+			osascript -e 'on run argv
+				tell application "Music"
+					set artistName to item 1 of argv as string
+					set theseTracks to every track of playlist "Library" whose artist is artistName
+					repeat with thisTrack in theseTracks
+						add thisTrack to queue
+					end repeat
+				end tell
+			end' "$*"
+		elif [ $1 = "-g" ]
+		then
+			if [ "$#" -eq 1 ]; then
+				genre=$(osascript -e 'tell application "Music" to get genre of every track' | tr "," "\n" | sort | awk '!seen[$0]++' | fzf)
+				set -- ${genre:1}
+			else
+				shift
+			fi
+			osascript -e 'on run argv
+				tell application "Music"
+					set genreName to item 1 of argv as string
+					set theseTracks to every track of playlist "Library" whose genre is genreName
+					repeat with thisTrack in theseTracks
+						add thisTrack to queue
+					end repeat
+				end tell
+			end' "$*"
+		else
+			printf '%s\n' "$usage";
+		fi
+	fi
+}
+
+shortcuts_queue() {
+	# Helper function to invoke Apple Shortcut for queueing
+	# Takes position, track name, artist, and album as arguments
+	# Format: shortcuts_queue "next|last" "Track Name" "Artist Name" "Album Name"
+	if [ "$#" -lt 2 ]; then
+		echo "Error: Position and track name required"
+		exit 1
+	fi
+	
+	queue_position="$1"
+	track_name="$2"
+	artist_name="${3:-}"
+	album_name="${4:-}"
+	shortcut_name="${SHORTCUT_QUEUE_NAME:-Add to Queue}"
+	
+	# Build input string: "next|Track Name|Artist Name|Album Name" or "last|Track Name|Artist Name|Album Name"
+	if [ -n "$artist_name" ] && [ -n "$album_name" ]; then
+		input="${queue_position}|${track_name}|${artist_name}|${album_name}"
+	elif [ -n "$artist_name" ]; then
+		input="${queue_position}|${track_name}|${artist_name}|"
+	else
+		input="${queue_position}|${track_name}||"
+	fi
+	
+	# Invoke the Shortcut
+	shortcuts run "$shortcut_name" <<< "$input" 2>/dev/null
+	
+	if [ $? -eq 0 ]; then
+		echo "Added to queue: $track_name"
+	else
+		echo "Error: Failed to add track to queue. Make sure the Shortcut '$shortcut_name' exists."
+		exit 1
+	fi
+}
+
 usage="Usage: am.sh [function] [-grouping] [name]
 
   list -s              	List all songs in your library.
@@ -397,6 +633,22 @@ usage="Usage: am.sh [function] [-grouping] [name]
   play -g              	Fzf for a genre and begin playback.
   play -g PATTERN       Play from the genre PATTERN.
   play -l              	Play from your entire library.
+  
+  queue [--next|--last] -s    Fzf for a song and add to queue.
+  queue [--next|--last] -s PATTERN  Add the song PATTERN to queue.
+  queue [--next|--last] -r    Fzf for a record and add to queue.
+  queue [--next|--last] -r PATTERN  Add tracks from the record PATTERN to queue.
+  queue [--next|--last] -a    Fzf for an artist and add to queue.
+  queue [--next|--last] -a PATTERN  Add tracks from the artist PATTERN to queue.
+  queue [--next|--last] -p    Fzf for a playlist and add to queue.
+  queue [--next|--last] -p PATTERN  Add tracks from the playlist PATTERN to queue.
+  queue [--next|--last] -g    Fzf for a genre and add to queue.
+  queue [--next|--last] -g PATTERN  Add tracks from the genre PATTERN to queue.
+  
+  --next                 Add to beginning of queue (play next)
+  --last                 Add to end of queue (default)
+  
+  shortcuts-queue TRACK  Add track to queue (for Apple Shortcuts integration).
   
   np                    Open the \"Now Playing\" TUI widget.
                         (Music.app track must be actively
@@ -433,6 +685,14 @@ else
 	then
 		shift
 		play "$@"
+	elif [ $1 = "queue" ]
+	then
+		shift
+		queue "$@"
+	elif [ $1 = "shortcuts-queue" ]
+	then
+		shift
+		shortcuts_queue "$@"
 	else
 		printf '%s\n' "$usage";
 	fi

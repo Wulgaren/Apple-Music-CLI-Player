@@ -246,13 +246,97 @@ play() {
 		elif [ $1 = "-s" ]
 		then
 			if [ "$#" -eq 1 ]; then
-				song=$(osascript -e 'tell application "Music" to get name of every track' | tr "," "\n" | fzf)
-				set -- ${song:1}
+				# Get only track names (fast for large libraries)
+				# Use case-insensitive sort to combine tracks with same name but different cases
+				song=$(osascript -e 'tell application "Music" to get name of every track' | tr "," "\n" | sort -uf | fzf)
+				# Check if user cancelled fzf (empty selection)
+				if [ -z "$song" ]; then
+					exit 0
+				fi
+				# Check if there are multiple tracks with this name (case insensitive)
+				# Get all tracks and filter for case-insensitive match (only when needed, after selection)
+				# This is acceptable since it's only after user selects a track, not upfront
+				all_tracks=$(osascript -e 'tell application "Music"
+					set trackList to {}
+					repeat with t in every track
+						set trackList to trackList & (name of t & "|" & artist of t & "|" & album of t)
+					end repeat
+					return trackList
+				end tell' | tr "," "\n")
+				# Filter tracks with same name (case insensitive)
+				track_list=$(echo "$all_tracks" | awk -F'|' -v song="$song" 'tolower($1) == tolower(song) {print $1 "|" $2 "|" $3}')
+				# Count tracks with same name (case insensitive)
+				match_count=$(echo "$track_list" | grep -v '^$' | wc -l | tr -d ' ')
+				if [ "$match_count" -gt 1 ]; then
+					# Multiple tracks with same name, show fzf with artist and album names
+					formatted=$(echo "$track_list" | awk -F'|' '{print $1 " - " $2 " - " $3}' | fzf)
+					# Check if user cancelled fzf
+					if [ -z "$formatted" ]; then
+						exit 0
+					fi
+					# Extract just the track name (before the first " - ")
+					song=$(echo "$formatted" | sed 's/ - .*//' | xargs)
+				fi
+				set -- "$song"
 			else
 				shift
+				query="$*"
+				# Use AppleScript to filter tracks directly - get tracks whose name contains the query
+				# Then do case-insensitive filtering in shell
+				track_list=$(osascript -e 'on run argv
+					tell application "Music"
+						set trackList to {}
+						set searchQuery to item 1 of argv
+						repeat with t in (every track whose name contains searchQuery)
+							set trackList to trackList & (name of t & "|" & artist of t & "|" & album of t)
+						end repeat
+						return trackList
+					end tell
+				end' "$query" | tr "," "\n")
+				
+				# Filter for case-insensitive match and format as "Track Name - Artist Name - Album Name"
+				matches=$(echo "$track_list" | awk -F'|' -v query="$query" '
+					tolower($1) ~ tolower(query) {
+						print $1 " - " $2 " - " $3
+					}
+				')
+				
+				match_count=$(echo "$matches" | grep -v '^$' | wc -l | tr -d ' ')
+				
+				if [ "$match_count" -eq 0 ]; then
+					echo "No tracks found matching: $query"
+					exit 1
+				fi
+				
+				# Count exact matches (case insensitive)
+				exact_matches=$(echo "$track_list" | awk -F'|' -v query="$query" '
+					tolower($1) == tolower(query) {
+						print $1 " - " $2 " - " $3
+					}
+				')
+				exact_count=$(echo "$exact_matches" | grep -v '^$' | wc -l | tr -d ' ')
+				
+				# If multiple matches or no exact match, show fzf with artist and album names
+				if [ "$match_count" -gt 1 ] || [ "$exact_count" -ne 1 ]; then
+					selected=$(echo "$matches" | fzf --query "$query")
+					# Check if user cancelled fzf (empty selection)
+					if [ -z "$selected" ]; then
+						exit 0
+					fi
+					# Extract track name from the selected formatted string
+					song=$(echo "$selected" | sed 's/ - .*//' | xargs)
+					set -- "$song"
+				else
+					# Exactly one exact match, extract track name from exact_matches
+					song=$(echo "$exact_matches" | sed 's/ - .*//' | xargs)
+					set -- "$song"
+				fi
 			fi
 		osascript -e 'on run argv
-			tell application "Music" to play track (item 1 of argv)
+			tell application "Music"
+				set trackName to item 1 of argv as string
+				play track trackName
+			end tell
 		end' "$*"
 		elif [ $1 = "-r" ]
 		then

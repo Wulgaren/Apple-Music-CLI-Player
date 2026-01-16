@@ -2,6 +2,7 @@
 np(){
 	init=1
 	help='false'
+	prev_name=""
 	while :
 	do
 		vol=$(osascript -e 'tell application "Music" to get sound volume')
@@ -34,10 +35,13 @@ Q                       Quit np and Music.app
 		if [ ${#currSec} = 1 ]; then
 			currSec="0$currSec"
 		fi
-		if (( curr < 2 || init == 1 )); then
+		# Get current track name to check if track has changed
+		current_name=$(osascript -e 'tell application "Music" to get name of current track' 2>/dev/null)
+		# Update track info if track changed or on first run or at start of track
+		if (( curr < 2 || init == 1 )) || [ "$current_name" != "$prev_name" ]; then
 			init=0
-			name=$(osascript -e 'tell application "Music" to get name of current track')
-			name=${name:0:50}
+			prev_name="$current_name"
+			name=${current_name:0:50}
 			artist=$(osascript -e 'tell application "Music" to get artist of current track')
 			artist=${artist:0:50}
 			record=$(osascript -e 'tell application "Music" to get album of current track')

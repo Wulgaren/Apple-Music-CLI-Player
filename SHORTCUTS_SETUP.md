@@ -1,3 +1,5 @@
+# Link to premade shortcut: https://www.icloud.com/shortcuts/15f942f6dbb840b1ac75fbecd5c9363f
+
 # Apple Shortcuts Integration Guide
 
 This guide will help you set up Apple Shortcuts to add tracks and albums to your Music queue from the terminal app.
@@ -59,14 +61,8 @@ The script passes JSON that can be parsed into a dictionary. Add these actions i
 - Key: `album`
 - Store in variable: `Album Name`
 
-**h1. Text**
-- Combine: `Track Name` + " " + `Artist Name`
-- Store in: `Search Query`
-- This creates a more precise search query
-
 **i1. Play Music**
-- Search: `Search Query`
-- **Important**: Turn ON "Add to Up Next" (this adds to queue instead of playing)
+- Filter with the respective fields
 - **Important**: Set "Add to Up Next" position based on `Position` variable:
   - If `Position` = "next": Add to beginning (play next)
   - If `Position` = "last": Add to end (default)
@@ -84,23 +80,14 @@ The script passes JSON that can be parsed into a dictionary. Add these actions i
 - Key: `artist`
 - Store in variable: `Artist Name` (may be empty)
 
-**h2. Text**
-- If `Artist Name` is not empty: Combine: `Album Name` + " " + `Artist Name`
-- Otherwise: Use `Album Name` directly
-- Store in: `Search Query`
-
 **i2. Play Music**
-- Search: `Search Query`
-- **Important**: Turn ON "Add to Up Next"
+- Filter with the respective fields
+- **Important**: Sort from biggest to smallest for the album because Apple Music adds them in reverse order for some reason
 - **Important**: Set "Add to Up Next" position based on `Position` variable:
   - If `Position` = "next": Add to beginning (play next)
   - If `Position` = "last": Add to end (default)
 - Turn OFF "Shuffle" and "Repeat" if they're on
 - This will search for the album and add all tracks to the queue
-
-**j. Show Notification** (optional)
-- Title: "Added to Queue"
-- Body: Use `Track Name` if available, otherwise use `Album Name`
 
 ### Step 3: Configure Shortcut Settings
 

@@ -1,5 +1,13 @@
 #!/bin/zsh
 np(){
+	# Helper function to format seconds into MM:SS
+	format_time() {
+		local seconds=$1
+		local min=$(( seconds / 60 ))
+		local sec=$(( seconds % 60 ))
+		printf "%02d:%02d" $min $sec
+	}
+	
 	init=1
 	help='false'
 	prev_name=""
@@ -27,14 +35,9 @@ Q                       Quit np and Music.app
 		duration=$(osascript -e 'tell application "Music" to get {player position} & {duration} of current track')
 		arr=(`echo ${duration}`)
 		curr=$(cut -d . -f 1 <<< ${arr[-2]})
-		currMin=$(echo $(( curr / 60 )))
-		currSec=$(echo $(( curr % 60 )))
-		if [ ${#currMin} = 1 ]; then
-			currMin="0$currMin"
-		fi
-		if [ ${#currSec} = 1 ]; then
-			currSec="0$currSec"
-		fi
+		end=$(cut -d . -f 1 <<< ${arr[-1]})
+		currTime=$(format_time $curr)
+		endTime=$(format_time $end)
 		# Get current track name to check if track has changed
 		current_name=$(osascript -e 'tell application "Music" to get name of current track' 2>/dev/null)
 		# Update track info if track changed or on first run or at start of track
@@ -46,17 +49,13 @@ Q                       Quit np and Music.app
 			artist=${artist:0:50}
 			record=$(osascript -e 'tell application "Music" to get album of current track')
 			record=${record:0:50}
+			# Re-fetch duration when track changes to ensure we get the correct duration for the new track
+			duration=$(osascript -e 'tell application "Music" to get {player position} & {duration} of current track')
+			arr=(`echo ${duration}`)
+			curr=$(cut -d . -f 1 <<< ${arr[-2]})
 			end=$(cut -d . -f 1 <<< ${arr[-1]})
-			endMin=$(echo $(( end / 60 )))
-			endSec=$(echo $(( end % 60 )))
-			if [ ${#endMin} = 1 ]
-			then
-				endMin="0$endMin"
-			fi
-			if [ ${#endSec} = 1 ]
-			then
-				endSec="0$endSec"
-			fi
+			currTime=$(format_time $curr)
+			endTime=$(format_time $end)
 			if [ "$1" != "-t" ]
 			then
 				rm ~/Library/Scripts/tmp*
@@ -99,9 +98,9 @@ Q                       Quit np and Music.app
 		if [ "$1" = "-t" ]
 		then
 			clear
-			paste <(printf '%s\n' "$name" "$artist - $record" "$shuffleIcon $repeatIcon $(echo $currMin:$currSec ${cyan}${prog}${nocolor}${progBG} $endMin:$endSec)" "$volIcon $(echo "${magenta}$vol${nocolor}$volBG")") 
+			paste <(printf '%s\n' "$name" "$artist - $record" "$shuffleIcon $repeatIcon $(echo $currTime ${cyan}${prog}${nocolor}${progBG} $endTime)" "$volIcon $(echo "${magenta}$vol${nocolor}$volBG")") 
 		else
-			paste <(printf %s "$art") <(printf %s "") <(printf %s "") <(printf %s "") <(printf '%s\n' "$name" "$artist - $record" "$shuffleIcon $repeatIcon $(echo $currMin:$currSec ${cyan}${prog}${nocolor}${progBG} $endMin:$endSec)" "$volIcon $(echo "${magenta}$vol${nocolor}$volBG")") 
+			paste <(printf %s "$art") <(printf %s "") <(printf %s "") <(printf %s "") <(printf '%s\n' "$name" "$artist - $record" "$shuffleIcon $repeatIcon $(echo $currTime ${cyan}${prog}${nocolor}${progBG} $endTime)" "$volIcon $(echo "${magenta}$vol${nocolor}$volBG")") 
 		fi
 		if [ $help = 'true' ]; then
 			printf '%s\n' "$keybindings"

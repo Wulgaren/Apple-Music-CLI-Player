@@ -1,4 +1,174 @@
 #!/bin/zsh
+
+# XML Library Functions
+# Get the path to the most recent XML library file
+get_xml_library_path() {
+	local alias_path="$HOME/Documents/Coding/Apple-Music-CLI-Player/xml alias"
+	local xml_dir
+	
+	# Try to resolve the alias - if it's a symlink, use readlink
+	if [ -L "$alias_path" ]; then
+		xml_dir=$(readlink -f "$alias_path")
+		xml_dir=$(dirname "$xml_dir")
+	else
+		# If it's a macOS alias, try to find the xml directory
+		# Based on what we found, it points to Music Library Script/xml
+		xml_dir="$HOME/Documents/Coding/Music Library Script/xml"
+	fi
+	
+	# Find the most recent XML file
+	if [ -d "$xml_dir" ]; then
+		ls -t "$xml_dir"/Library*.xml 2>/dev/null | head -1
+	else
+		echo "Error: Could not find XML library directory" >&2
+		return 1
+	fi
+}
+
+# Parse XML and extract tracks in format: name|artist|album|genre
+# This function caches the parsed data for performance
+_xml_cache_file=""
+_xml_cache_data=""
+get_tracks_from_xml() {
+	local xml_file="${1:-$(get_xml_library_path)}"
+	
+	# Use cache if same file and cache exists
+	if [ -n "$_xml_cache_file" ] && [ "$_xml_cache_file" = "$xml_file" ] && [ -n "$_xml_cache_data" ]; then
+		echo "$_xml_cache_data"
+		return 0
+	fi
+	
+	if [ ! -f "$xml_file" ]; then
+		echo "Error: XML file not found: $xml_file" >&2
+		return 1
+	fi
+	
+	# Use Python to parse the plist XML efficiently
+	_xml_cache_data=$(XML_FILE="$xml_file" python3 << 'PYTHON_EOF'
+import plistlib
+import sys
+import os
+
+xml_file = os.environ.get('XML_FILE', '')
+if not xml_file or not os.path.exists(xml_file):
+    sys.exit(1)
+
+try:
+    with open(xml_file, 'rb') as f:
+        plist = plistlib.load(f)
+    
+    tracks = plist.get('Tracks', {})
+    track_list = []
+    
+    for track_id, track_data in tracks.items():
+        name = track_data.get('Name', '')
+        artist = track_data.get('Artist', '')
+        album = track_data.get('Album', '')
+        genre = track_data.get('Genre', '')
+        album_artist = track_data.get('Album Artist', '')
+        
+        # Skip tracks without a name
+        if not name:
+            continue
+        
+        # Use Album Artist as the artist field, fallback to Artist if Album Artist is empty
+        # Format: name|album_artist|album|genre|artist (original artist kept for reference)
+        display_artist = album_artist if album_artist else artist
+        track_list.append(f"{name}|{display_artist}|{album}|{genre}|{artist}")
+    
+    print('\n'.join(track_list))
+except Exception as e:
+    sys.exit(1)
+PYTHON_EOF
+	)
+	
+	if [ $? -eq 0 ] && [ -n "$_xml_cache_data" ]; then
+		_xml_cache_file="$xml_file"
+		echo "$_xml_cache_data"
+		return 0
+	else
+		echo "Error: Failed to parse XML file" >&2
+		return 1
+	fi
+}
+
+# Get unique values for a field (artist, album, genre)
+get_unique_from_xml() {
+	local field="$1"  # "artist", "album", or "genre"
+	local xml_file="${2:-$(get_xml_library_path)}"
+	
+	local tracks=$(get_tracks_from_xml "$xml_file")
+	if [ $? -ne 0 ]; then
+		return 1
+	fi
+	
+	case "$field" in
+		artist)
+			# Field 2 is now album_artist (after Python update)
+			echo "$tracks" | awk -F'|' '{if ($2 != "") print $2}' | sort -u
+			;;
+		album)
+			echo "$tracks" | awk -F'|' '{if ($3 != "") print $3}' | sort -u
+			;;
+		genre)
+			echo "$tracks" | awk -F'|' '{if ($4 != "") print $4}' | sort -u
+			;;
+		*)
+			return 1
+			;;
+	esac
+}
+
+# Get unique albums with their album artists in format: "Album - Album Artist"
+get_albums_with_artists() {
+	local xml_file="${1:-$(get_xml_library_path)}"
+	
+	local tracks=$(get_tracks_from_xml "$xml_file")
+	if [ $? -ne 0 ]; then
+		return 1
+	fi
+	
+	# Get unique album-album_artist pairs, format as "Album - Album Artist"
+	# Field 2 is now album_artist, field 3 is album
+	echo "$tracks" | awk -F'|' '{
+		if ($3 != "" && $2 != "") {
+			# Use album and album artist
+			print $3 " - " $2
+		} else if ($3 != "") {
+			# Album without artist
+			print $3
+		}
+	}' | sort -u
+}
+
+# Get tracks filtered by field and value
+get_tracks_by_field() {
+	local field="$1"  # "artist", "album", or "genre"
+	local value="$2"
+	local xml_file="${3:-$(get_xml_library_path)}"
+	
+	local tracks=$(get_tracks_from_xml "$xml_file")
+	if [ $? -ne 0 ]; then
+		return 1
+	fi
+	
+	case "$field" in
+		artist)
+			# Field 2 is now album_artist (after Python update), match against it
+			echo "$tracks" | awk -F'|' -v val="$value" 'tolower($2) == tolower(val) {print $1 "|" $2 "|" $3 "|" $4}'
+			;;
+		album)
+			echo "$tracks" | awk -F'|' -v val="$value" 'tolower($3) == tolower(val) {print $1 "|" $2 "|" $3 "|" $4}'
+			;;
+		genre)
+			echo "$tracks" | awk -F'|' -v val="$value" 'tolower($4) == tolower(val) {print $1 "|" $2 "|" $3 "|" $4}'
+			;;
+		*)
+			return 1
+			;;
+	esac
+}
+
 np(){
 	# Helper function to format seconds into MM:SS
 	format_time() {
@@ -13,9 +183,9 @@ np(){
 	prev_name=""
 	while :
 	do
-		vol=$(osascript -e 'tell application "Music" to get sound volume')
-		shuffle=$(osascript -e 'tell application "Music" to get shuffle enabled')
-		repeat=$(osascript -e 'tell application "Music" to get song repeat')
+		vol=$(osascript -e 'tell application "Music" to get sound volume' 2>/dev/null || echo "0")
+		shuffle=$(osascript -e 'tell application "Music" to get shuffle enabled' 2>/dev/null || echo "false")
+		repeat=$(osascript -e 'tell application "Music" to get song repeat' 2>/dev/null || echo "off")
 	    keybindings="
 Keybindings:
 
@@ -32,28 +202,84 @@ r                       Toggle song repeat
 q                       Quit np
 Q                       Quit np and Music.app
 ?                       Show / hide keybindings"
-		duration=$(osascript -e 'tell application "Music" to get {player position} & {duration} of current track')
+		# Check if there's a current track playing
+		current_name=$(osascript -e 'tell application "Music" to get name of current track' 2>/dev/null)
+		if [ -z "$current_name" ]; then
+			clear
+			echo "No track currently playing"
+			echo ""
+			echo "Press 'p' to play, 'q' to quit, or '?' for help"
+			input=$(/bin/bash -c "read -n 1 -t 1 input; echo \$input | xargs")
+			if [[ "${input}" == *"p"* ]]; then
+				osascript -e 'tell app "Music" to playpause' 2>/dev/null
+			elif [[ "${input}" == *"q"* ]]; then
+				clear
+				exit
+			elif [[ "${input}" == *"Q"* ]]; then
+				killall Music
+				clear
+				exit
+			elif [[ "${input}" == *"?"* ]]; then
+				printf '%s\n' "$keybindings"
+			fi
+			read -sk 1 -t 0.001
+			continue
+		fi
+		
+		duration=$(osascript -e 'tell application "Music" to get {player position} & {duration} of current track' 2>/dev/null)
+		if [ -z "$duration" ]; then
+			clear
+			echo "No track currently playing"
+			echo ""
+			echo "Press 'p' to play, 'q' to quit, or '?' for help"
+			input=$(/bin/bash -c "read -n 1 -t 1 input; echo \$input | xargs")
+			if [[ "${input}" == *"p"* ]]; then
+				osascript -e 'tell app "Music" to playpause' 2>/dev/null
+			elif [[ "${input}" == *"q"* ]]; then
+				clear
+				exit
+			elif [[ "${input}" == *"Q"* ]]; then
+				killall Music
+				clear
+				exit
+			elif [[ "${input}" == *"?"* ]]; then
+				printf '%s\n' "$keybindings"
+			fi
+			read -sk 1 -t 0.001
+			continue
+		fi
+		
 		arr=(`echo ${duration}`)
-		curr=$(cut -d . -f 1 <<< ${arr[-2]})
-		end=$(cut -d . -f 1 <<< ${arr[-1]})
+		curr=$(cut -d . -f 1 <<< ${arr[-2]} 2>/dev/null || echo "0")
+		end=$(cut -d . -f 1 <<< ${arr[-1]} 2>/dev/null || echo "0")
+		
+		# Prevent division by zero
+		if [ "$end" -eq 0 ]; then
+			end=1
+		fi
+		
 		currTime=$(format_time $curr)
 		endTime=$(format_time $end)
-		# Get current track name to check if track has changed
-		current_name=$(osascript -e 'tell application "Music" to get name of current track' 2>/dev/null)
 		# Update track info if track changed or on first run or at start of track
 		if (( curr < 2 || init == 1 )) || [ "$current_name" != "$prev_name" ]; then
 			init=0
 			prev_name="$current_name"
 			name=${current_name:0:50}
-			artist=$(osascript -e 'tell application "Music" to get artist of current track')
+			artist=$(osascript -e 'tell application "Music" to get artist of current track' 2>/dev/null || echo "Unknown Artist")
 			artist=${artist:0:50}
-			record=$(osascript -e 'tell application "Music" to get album of current track')
+			record=$(osascript -e 'tell application "Music" to get album of current track' 2>/dev/null || echo "Unknown Album")
 			record=${record:0:50}
 			# Re-fetch duration when track changes to ensure we get the correct duration for the new track
-			duration=$(osascript -e 'tell application "Music" to get {player position} & {duration} of current track')
-			arr=(`echo ${duration}`)
-			curr=$(cut -d . -f 1 <<< ${arr[-2]})
-			end=$(cut -d . -f 1 <<< ${arr[-1]})
+			duration=$(osascript -e 'tell application "Music" to get {player position} & {duration} of current track' 2>/dev/null)
+			if [ -n "$duration" ]; then
+				arr=(`echo ${duration}`)
+				curr=$(cut -d . -f 1 <<< ${arr[-2]} 2>/dev/null || echo "0")
+				end=$(cut -d . -f 1 <<< ${arr[-1]} 2>/dev/null || echo "0")
+				# Prevent division by zero
+				if [ "$end" -eq 0 ]; then
+					end=1
+				fi
+			fi
 			currTime=$(format_time $curr)
 			endTime=$(format_time $end)
 			if [ "$1" != "-t" ]
@@ -70,12 +296,21 @@ Q                       Quit np and Music.app
 			magenta=$(echo -e '\033[01;35m')
 			nocolor=$(echo -e '\033[0m')
 		fi
-		if [ $vol = 0 ]; then
+		# Ensure vol is a number, default to 0 if not
+		vol=${vol:-0}
+		if [ "$vol" -eq 0 ] 2>/dev/null; then
 			volIcon=🔇
 		else
 			volIcon=🔊
 		fi
+		# Calculate volume bar position (0-7 scale)
 		vol=$(( vol / 12 ))
+		# Ensure vol is within valid range
+		if [ "$vol" -gt 7 ]; then
+			vol=7
+		elif [ "$vol" -lt 0 ]; then
+			vol=0
+		fi
 		if [ $shuffle = 'false' ]; then
 			shuffleIcon='➡️ '
 		else
@@ -92,7 +327,12 @@ Q                       Quit np and Music.app
 		volBG=${volBars:$vol}
 		vol=${volBars:0:$vol}
 		progressBars='▇▇▇▇▇▇▇▇▇'
-		percentRemain=$(( (curr * 100) / end / 10 ))
+		# Prevent division by zero
+		if [ "$end" -gt 0 ]; then
+			percentRemain=$(( (curr * 100) / end / 10 ))
+		else
+			percentRemain=0
+		fi
 		progBG=${progressBars:$percentRemain}
 		prog=${progressBars:0:$percentRemain}
 		if [ "$1" = "-t" ]
@@ -170,6 +410,7 @@ list(){
 	else
 		if [ $1 = "-p" ]
 		then
+			# Playlists still need AppleScript since they're not in XML
 			if [ "$#" -eq 1 ]; then
 				shift
 				osascript -e 'tell application "Music" to get name of playlists' "$*" | tr "," "\n" | sort | awk '!seen[$0]++' | /usr/bin/pr -t -a -3
@@ -181,7 +422,7 @@ list(){
 		then
 			if [ "$#" -eq 1 ]; then
 				shift
-				osascript -e 'on run args' -e 'tell application "Music" to get name of every track' -e 'end' "$*" | tr "," "\n" | sort | awk '!seen[$0]++' | /usr/bin/pr -t -a -3
+				get_tracks_from_xml | awk -F'|' '{print $1}' | sort | awk '!seen[$0]++' | /usr/bin/pr -t -a -3
 			else
 				echo $usage
 			fi
@@ -189,28 +430,28 @@ list(){
 		then
 			if [ "$#" -eq 1 ]; then
 				shift
-				osascript -e 'on run args' -e 'tell application "Music" to get album of every track' -e 'end' "$*" | tr "," "\n" | sort | awk '!seen[$0]++' | /usr/bin/pr -t -a -3
+				get_unique_from_xml album | /usr/bin/pr -t -a -3
 			else
 				shift
-				osascript -e 'on run args' -e 'tell application "Music" to get name of every track whose album is (item 1 of args)' -e 'end' "$*" | tr "," "\n" | sort | awk '!seen[$0]++' | /usr/bin/pr -t -a -3
+				get_tracks_by_field album "$*" | awk -F'|' '{print $1}' | sort | awk '!seen[$0]++' | /usr/bin/pr -t -a -3
 			fi
 		elif [ $1 = "-a" ]
 		then
 			if [ "$#" -eq 1 ]; then
 				shift
-				osascript -e 'on run args' -e 'tell application "Music" to get artist of every track' -e 'end' "$*" | tr "," "\n" | sort | awk '!seen[$0]++' | /usr/bin/pr -t -a -3
+				get_unique_from_xml artist | /usr/bin/pr -t -a -3
 			else
 				shift
-				osascript -e 'on run args' -e 'tell application "Music" to get name of every track whose artist is (item 1 of args)' -e 'end' "$*" | tr "," "\n" | sort | awk '!seen[$0]++' | /usr/bin/pr -t -a -3
+				get_tracks_by_field artist "$*" | awk -F'|' '{print $1}' | sort | awk '!seen[$0]++' | /usr/bin/pr -t -a -3
 			fi
 		elif [ $1 = "-g" ]
 		then
 			if [ "$#" -eq 1 ]; then
 				shift
-				osascript -e 'on run args' -e 'tell application "Music" to get genre of every track' -e 'end' "$*" | tr "," "\n" | sort | awk '!seen[$0]++' | /usr/bin/pr -t -a -3
+				get_unique_from_xml genre | /usr/bin/pr -t -a -3
 			else
 				shift
-				osascript -e 'on run args' -e 'tell application "Music" to get name of every track whose genre is (item 1 of args)' -e 'end' "$*" | tr "," "\n" | sort | awk '!seen[$0]++' | /usr/bin/pr -t -a -3
+				get_tracks_by_field genre "$*" | awk -F'|' '{print $1}' | sort | awk '!seen[$0]++' | /usr/bin/pr -t -a -3
 			fi
 		else
 			printf '%s\n' "$usage";
@@ -249,23 +490,16 @@ play() {
 		elif [ $1 = "-s" ]
 		then
 			if [ "$#" -eq 1 ]; then
-				# Get only track names (fast for large libraries)
+				# Get only track names from XML (fast for large libraries)
 				# Use case-insensitive sort to combine tracks with same name but different cases
-				song=$(osascript -e 'tell application "Music" to get name of every track' | tr "," "\n" | sort -uf | fzf)
+				song=$(get_tracks_from_xml | awk -F'|' '{print $1}' | sort -uf | fzf)
 				# Check if user cancelled fzf (empty selection)
 				if [ -z "$song" ]; then
 					exit 0
 				fi
 				# Check if there are multiple tracks with this name (case insensitive)
 				# Get all tracks and filter for case-insensitive match (only when needed, after selection)
-				# This is acceptable since it's only after user selects a track, not upfront
-				all_tracks=$(osascript -e 'tell application "Music"
-					set trackList to {}
-					repeat with t in every track
-						set trackList to trackList & (name of t & "|" & artist of t & "|" & album of t)
-					end repeat
-					return trackList
-				end tell' | tr "," "\n")
+				all_tracks=$(get_tracks_from_xml)
 				# Filter tracks with same name (case insensitive)
 				track_list=$(echo "$all_tracks" | awk -F'|' -v song="$song" 'tolower($1) == tolower(song) {print $1 "|" $2 "|" $3}')
 				# Count tracks with same name (case insensitive)
@@ -284,18 +518,8 @@ play() {
 			else
 				shift
 				query="$*"
-				# Use AppleScript to filter tracks directly - get tracks whose name contains the query
-				# Then do case-insensitive filtering in shell
-				track_list=$(osascript -e 'on run argv
-					tell application "Music"
-						set trackList to {}
-						set searchQuery to item 1 of argv
-						repeat with t in (every track whose name contains searchQuery)
-							set trackList to trackList & (name of t & "|" & artist of t & "|" & album of t)
-						end repeat
-						return trackList
-					end tell
-				end' "$query" | tr "," "\n")
+				# Get all tracks from XML and filter by name containing the query
+				track_list=$(get_tracks_from_xml)
 				
 				# Filter for case-insensitive match and format as "Track Name - Artist Name - Album Name"
 				matches=$(echo "$track_list" | awk -F'|' -v query="$query" '
@@ -344,17 +568,33 @@ play() {
 		elif [ $1 = "-r" ]
 		then
 			if [ "$#" -eq 1 ]; then
-				record=$(osascript -e 'tell application "Music" to get album of every track' | tr "," "\n" | sort | awk '!seen[$0]++' | fzf)
-				set -- ${record:1}
+				record=$(get_albums_with_artists | fzf)
+				if [ -z "$record" ]; then
+					exit 0
+				fi
+				# Extract just the album name (before " - ")
+				record=$(echo "$record" | sed 's/ - .*//' | xargs)
+				set -- "$record"
 			else
 				shift
+				query="$*"
+				record=$(get_albums_with_artists | fzf --query "$query")
+				if [ -z "$record" ]; then
+					exit 0
+				fi
+				# Extract just the album name (before " - ")
+				record=$(echo "$record" | sed 's/ - .*//' | xargs)
+				set -- "$record"
 			fi
 			osascript -e 'on run argv' -e 'tell application "Music"' -e 'if (exists playlist "temp_playlist") then' -e 'delete playlist "temp_playlist"' -e 'end if' -e 'set name of (make new playlist) to "temp_playlist"' -e 'set theseTracks to every track of playlist "Library" whose album is (item 1 of argv)' -e 'repeat with thisTrack in theseTracks' -e 'duplicate thisTrack to playlist "temp_playlist"' -e 'end repeat' -e 'play playlist "temp_playlist"' -e 'end tell' -e 'end' "$*"
 		elif [ $1 = "-a" ]
 		then
 			if [ "$#" -eq 1 ]; then
-				artist=$(osascript -e 'tell application "Music" to get artist of every track' | tr "," "\n" | sort | awk '!seen[$0]++' | fzf)
-				set -- ${artist:1}
+				artist=$(get_unique_from_xml artist | fzf)
+				if [ -z "$artist" ]; then
+					exit 0
+				fi
+				set -- "$artist"
 			else
 				shift
 			fi
@@ -362,8 +602,11 @@ play() {
 		elif [ $1 = "-g" ]
 		then
 			if [ "$#" -eq 1 ]; then
-				genre=$(osascript -e 'tell application "Music" to get genre of every track' | tr "," "\n" | sort | awk '!seen[$0]++' | fzf)
-				set -- ${genre:1}
+				genre=$(get_unique_from_xml genre | fzf)
+				if [ -z "$genre" ]; then
+					exit 0
+				fi
+				set -- "$genre"
 			else
 				shift
 			fi
@@ -408,15 +651,9 @@ queue() {
 	case "$1" in
 		-s)
 			if [ "$#" -eq 1 ]; then
-				song=$(osascript -e 'tell application "Music" to get name of every track' | tr "," "\n" | sort -uf | fzf)
+				song=$(get_tracks_from_xml | awk -F'|' '{print $1}' | sort -uf | fzf)
 				[ -z "$song" ] && exit 0
-				all_tracks=$(osascript -e 'tell application "Music"
-					set trackList to {}
-					repeat with t in every track
-						set trackList to trackList & (name of t & "|" & artist of t & "|" & album of t)
-					end repeat
-					return trackList
-				end tell' | tr "," "\n")
+				all_tracks=$(get_tracks_from_xml)
 				track_list=$(echo "$all_tracks" | awk -F'|' -v song="$song" 'tolower($1) == tolower(song) {print $1 "|" $2 "|" $3}')
 				match_count=$(echo "$track_list" | grep -v '^$' | wc -l | tr -d ' ')
 				if [ "$match_count" -gt 1 ]; then
@@ -434,16 +671,7 @@ queue() {
 			else
 				shift
 				query="$*"
-				track_list=$(osascript -e 'on run argv
-					tell application "Music"
-						set trackList to {}
-						set searchQuery to item 1 of argv
-						repeat with t in (every track whose name contains searchQuery)
-							set trackList to trackList & (name of t & "|" & artist of t & "|" & album of t)
-						end repeat
-						return trackList
-					end tell
-				end' "$query" | tr "," "\n")
+				track_list=$(get_tracks_from_xml)
 				matches=$(echo "$track_list" | awk -F'|' -v query="$query" 'tolower($1) ~ tolower(query) {print $1 " - " $2 " - " $3}')
 				match_count=$(echo "$matches" | grep -v '^$' | wc -l | tr -d ' ')
 				[ "$match_count" -eq 0 ] && echo "No tracks found matching: $query" && exit 1
@@ -465,21 +693,24 @@ queue() {
 			;;
 		-r)
 			if [ "$#" -eq 1 ]; then
-				record=$(osascript -e 'tell application "Music" to get album of every track' | tr "," "\n" | sort | awk '!seen[$0]++' | fzf)
+				record=$(get_albums_with_artists | fzf)
 				[ -z "$record" ] && exit 0
+				# Extract just the album name (before " - ")
+				record=$(echo "$record" | sed 's/ - .*//' | xargs)
 				set -- "$record"
 			else
 				shift
+				query="$*"
+				record=$(get_albums_with_artists | fzf --query "$query")
+				[ -z "$record" ] && exit 0
+				# Extract just the album name (before " - ")
+				record=$(echo "$record" | sed 's/ - .*//' | xargs)
+				set -- "$record"
 			fi
 			album_name="$*"
-			# Get artist from the first track of this album
-			artist_name=$(osascript -e 'on run argv
-				tell application "Music"
-					set albumName to item 1 of argv as string
-					set firstTrack to first track of playlist "Library" whose album is albumName
-					return artist of firstTrack
-				end tell
-			end' "$album_name" 2>/dev/null)
+			# Get artist from the first track of this album from XML
+			album_tracks=$(get_tracks_by_field album "$album_name")
+			artist_name=$(echo "$album_tracks" | awk -F'|' '{if ($2 != "") {print $2; exit}}')
 			# Pass album info as JSON to shortcuts_queue
 			shortcuts_queue "$queue_position" "" "$artist_name" "$album_name" "album"
 			;;
